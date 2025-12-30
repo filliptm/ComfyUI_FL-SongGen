@@ -7,19 +7,70 @@ Generate complete songs with vocals and instrumentals from lyrics!
 
 import sys
 import os
+import importlib.util
 
-# Add current directory to path for imports
-current_dir = os.path.dirname(__file__)
-if current_dir not in sys.path:
-    sys.path.insert(0, current_dir)
+# Get current directory
+current_dir = os.path.dirname(os.path.abspath(__file__))
+
+def import_module_from_path(module_name, file_path):
+    """Import a module from an explicit file path to avoid naming conflicts."""
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+# Import utilities first (needed by nodes)
+sg_paths = import_module_from_path(
+    "sg_paths",
+    os.path.join(current_dir, "fl_utils", "paths.py")
+)
+sg_audio_utils = import_module_from_path(
+    "sg_audio_utils",
+    os.path.join(current_dir, "fl_utils", "audio_utils.py")
+)
+sg_model_manager = import_module_from_path(
+    "sg_model_manager",
+    os.path.join(current_dir, "fl_utils", "model_manager.py")
+)
+sg_songgen_wrapper = import_module_from_path(
+    "sg_songgen_wrapper",
+    os.path.join(current_dir, "fl_utils", "songgen_wrapper.py")
+)
 
 # Import nodes
-from .fl_nodes.model_loader import FL_SongGen_ModelLoader
-from .fl_nodes.lyrics_formatter import FL_SongGen_LyricsFormatter
-from .fl_nodes.description_builder import FL_SongGen_DescriptionBuilder
-from .fl_nodes.generate import FL_SongGen_Generate
-from .fl_nodes.style_transfer import FL_SongGen_StyleTransfer
-from .fl_nodes.auto_style import FL_SongGen_AutoStyle
+sg_model_loader = import_module_from_path(
+    "sg_model_loader",
+    os.path.join(current_dir, "fl_nodes", "model_loader.py")
+)
+sg_lyrics_formatter = import_module_from_path(
+    "sg_lyrics_formatter",
+    os.path.join(current_dir, "fl_nodes", "lyrics_formatter.py")
+)
+sg_description_builder = import_module_from_path(
+    "sg_description_builder",
+    os.path.join(current_dir, "fl_nodes", "description_builder.py")
+)
+sg_generate = import_module_from_path(
+    "sg_generate",
+    os.path.join(current_dir, "fl_nodes", "generate.py")
+)
+sg_style_transfer = import_module_from_path(
+    "sg_style_transfer",
+    os.path.join(current_dir, "fl_nodes", "style_transfer.py")
+)
+sg_auto_style = import_module_from_path(
+    "sg_auto_style",
+    os.path.join(current_dir, "fl_nodes", "auto_style.py")
+)
+
+# Get node classes
+FL_SongGen_ModelLoader = sg_model_loader.FL_SongGen_ModelLoader
+FL_SongGen_LyricsFormatter = sg_lyrics_formatter.FL_SongGen_LyricsFormatter
+FL_SongGen_DescriptionBuilder = sg_description_builder.FL_SongGen_DescriptionBuilder
+FL_SongGen_Generate = sg_generate.FL_SongGen_Generate
+FL_SongGen_StyleTransfer = sg_style_transfer.FL_SongGen_StyleTransfer
+FL_SongGen_AutoStyle = sg_auto_style.FL_SongGen_AutoStyle
 
 # Node registration for ComfyUI
 NODE_CLASS_MAPPINGS = {

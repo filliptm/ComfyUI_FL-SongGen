@@ -1,6 +1,7 @@
 """
 Model management for FL Song Gen.
 Handles model loading, caching, and configuration.
+Uses bundled code (codeclm, third_party) - only downloads model checkpoints.
 """
 
 import os
@@ -27,10 +28,15 @@ def _import_paths():
 
 _paths = _import_paths()
 get_model_variant_dir = _paths.get_model_variant_dir
-get_songgen_repo_path = _paths.get_songgen_repo_path
+get_package_root = _paths.get_package_root
 get_auto_prompts_path = _paths.get_auto_prompts_path
 get_demucs_dir = _paths.get_demucs_dir
+get_checkpoints_dir = _paths.get_checkpoints_dir
 check_model_files = _paths.check_model_files
+check_bundled_files = _paths.check_bundled_files
+check_checkpoint_files = _paths.check_checkpoint_files
+setup_bundled_imports = _paths.setup_bundled_imports
+get_bundled_third_party_path = _paths.get_bundled_third_party_path
 
 # Model variant configurations with HuggingFace repo info
 MODEL_VARIANTS = {
@@ -72,8 +78,8 @@ MODEL_VARIANTS = {
     }
 }
 
-# Runtime files HuggingFace repo
-RUNTIME_HF_REPO = "lglg666/SongGeneration-Runtime"
+# Checkpoints HuggingFace repo - contains only model weights (no code)
+CHECKPOINTS_HF_REPO = "lglg666/SongGeneration-Runtime"
 
 AUTO_STYLE_PRESETS = [
     "Pop", "R&B", "Dance", "Jazz", "Folk",
@@ -107,17 +113,8 @@ def clear_model_cache():
 
 
 def _setup_songgen_imports():
-    """Add SongGeneration repo to Python path."""
-    songgen_path = get_songgen_repo_path()
-    songgen_str = str(songgen_path)
-
-    if songgen_str not in sys.path:
-        sys.path.insert(0, songgen_str)
-
-    # Also add third_party for demucs
-    third_party = songgen_path / "third_party"
-    if str(third_party) not in sys.path:
-        sys.path.insert(0, str(third_party))
+    """Set up Python path for bundled code imports."""
+    setup_bundled_imports()
 
 
 def _register_omegaconf_resolvers():
@@ -205,121 +202,48 @@ def _download_model_files(variant: str) -> bool:
         return False
 
 
-# Required runtime files - only download what we actually need
-RUNTIME_FILES = {
-    # Audio tokenizers
-    "ckpt/model_1rvq/model_2_fixed.safetensors": "Audio tokenizer (4.7GB)",
-    "ckpt/model_septoken/model_2.safetensors": "Separate tokenizer (4.8GB)",
-    # VAE
-    "ckpt/vae/autoencoder_music_1320k.ckpt": "VAE model (675MB)",
-    "ckpt/vae/stable_audio_1920_vae.json": "VAE config",
-    # Encoder
-    "ckpt/encode-s12k.pt": "Encoder (4GB)",
-    # Content vec model
-    "ckpt/models--lengyue233--content-vec-best/blobs/5186a71b15933aca2d9942db95e1aff02642d1f0": "Content vec config",
-    "ckpt/models--lengyue233--content-vec-best/blobs/d8dd400e054ddf4e6be75dab5a2549db748cc99e756a097c496c099f65a4854e": "Content vec model (378MB)",
-    "ckpt/models--lengyue233--content-vec-best/refs/main": "Content vec ref",
-    "ckpt/models--lengyue233--content-vec-best/snapshots/4e9e4560d90e7dbc9035ab4b5582b1da591fd6c3/config.json": "Content vec snapshot config",
-    "ckpt/models--lengyue233--content-vec-best/snapshots/4e9e4560d90e7dbc9035ab4b5582b1da591fd6c3/pytorch_model.bin": "Content vec snapshot model",
-    # Qwen tokenizer files (small)
-    "third_party/Qwen2-7B/config.json": "Qwen config",
-    "third_party/Qwen2-7B/generation_config.json": "Qwen generation config",
-    "third_party/Qwen2-7B/merges.txt": "Qwen merges",
-    "third_party/Qwen2-7B/tokenizer.json": "Qwen tokenizer",
-    "third_party/Qwen2-7B/tokenizer_config.json": "Qwen tokenizer config",
-    "third_party/Qwen2-7B/vocab.json": "Qwen vocab",
-    # Demucs checkpoint
-    "third_party/demucs/ckpt/htdemucs.pth": "Demucs model (168MB)",
-    "third_party/demucs/ckpt/htdemucs.yaml": "Demucs config",
-    # Demucs code files
-    "third_party/demucs/__init__.py": "Demucs init",
-    "third_party/demucs/run.py": "Demucs run",
-    "third_party/demucs/models/__init__.py": "Demucs models init",
-    "third_party/demucs/models/apply.py": "Demucs apply",
-    "third_party/demucs/models/audio.py": "Demucs audio",
-    "third_party/demucs/models/demucs.py": "Demucs model",
-    "third_party/demucs/models/htdemucs.py": "Demucs htdemucs",
-    "third_party/demucs/models/pretrained.py": "Demucs pretrained",
-    "third_party/demucs/models/spec.py": "Demucs spec",
-    "third_party/demucs/models/states.py": "Demucs states",
-    "third_party/demucs/models/transformer.py": "Demucs transformer",
-    "third_party/demucs/models/utils.py": "Demucs utils",
-}
-
-# stable_audio_tools files - download the whole folder since there are many
-STABLE_AUDIO_FOLDERS = [
-    "third_party/stable_audio_tools",
-]
-
-
-def _download_runtime_files() -> bool:
+def _download_checkpoint_files() -> bool:
     """
-    Download runtime files (ckpt and third_party folders) to SongGeneration repo.
-    Only downloads the specific files needed for inference.
+    Download checkpoint files (model weights only) from HuggingFace.
+    Code is bundled in the node pack, so we only need the weights.
 
     Returns:
         True if download successful
     """
     try:
-        from huggingface_hub import hf_hub_download, snapshot_download
+        from huggingface_hub import snapshot_download
     except ImportError:
         print("[FL SongGen] ERROR: huggingface_hub not installed. Please run: pip install huggingface-hub")
         return False
 
-    songgen_path = get_songgen_repo_path()
+    ckpt_dir = get_checkpoints_dir()
 
-    # Check if all required files exist
-    all_exist = True
-    for filepath in RUNTIME_FILES.keys():
-        if not (songgen_path / filepath).exists():
-            all_exist = False
-            break
-
-    if all_exist:
-        print("[FL SongGen] Runtime files already exist")
+    # Check if checkpoints already exist
+    ckpt_check = check_checkpoint_files()
+    if ckpt_check['exists']:
+        print("[FL SongGen] Checkpoint files already exist")
         return True
 
-    print(f"[FL SongGen] Downloading runtime files...")
-    print(f"[FL SongGen] From: {RUNTIME_HF_REPO}")
-    print(f"[FL SongGen] To: {songgen_path}")
+    print(f"[FL SongGen] Downloading checkpoint files...")
+    print(f"[FL SongGen] From: {CHECKPOINTS_HF_REPO}")
+    print(f"[FL SongGen] To: {ckpt_dir}")
+    print("[FL SongGen] This may take a while (several GB of data)...")
 
     try:
-        # Download individual files
-        for filepath, description in RUNTIME_FILES.items():
-            target_file = songgen_path / filepath
-            if target_file.exists():
-                continue
+        # Download only checkpoint files (model weights), not code
+        snapshot_download(
+            repo_id=CHECKPOINTS_HF_REPO,
+            local_dir=str(ckpt_dir.parent),  # Download to songgen dir
+            local_dir_use_symlinks=False,
+            allow_patterns=["ckpt/**"],  # Only get checkpoint files
+            ignore_patterns=["*.md", ".gitattributes", ".git*", "third_party/**", "codeclm/**"],
+        )
 
-            print(f"[FL SongGen] Downloading {description}...")
-            target_file.parent.mkdir(parents=True, exist_ok=True)
-
-            hf_hub_download(
-                repo_id=RUNTIME_HF_REPO,
-                filename=filepath,
-                local_dir=str(songgen_path),
-                local_dir_use_symlinks=False,
-            )
-
-        # Download stable_audio_tools folder (has many files)
-        for folder in STABLE_AUDIO_FOLDERS:
-            folder_path = songgen_path / folder
-            if folder_path.exists():
-                continue
-
-            print(f"[FL SongGen] Downloading {folder}...")
-            snapshot_download(
-                repo_id=RUNTIME_HF_REPO,
-                local_dir=str(songgen_path),
-                local_dir_use_symlinks=False,
-                allow_patterns=[f"{folder}/**"],
-                ignore_patterns=["*.md", ".gitattributes", "*.git*"],
-            )
-
-        print(f"[FL SongGen] Runtime files download complete!")
+        print(f"[FL SongGen] Checkpoint download complete!")
         return True
 
     except Exception as e:
-        print(f"[FL SongGen] ERROR downloading runtime files: {e}")
+        print(f"[FL SongGen] ERROR downloading checkpoints: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -335,29 +259,27 @@ def ensure_model_files(variant: str) -> bool:
     Returns:
         True if files exist or were downloaded successfully
     """
-    # First check if runtime files exist
-    try:
-        songgen_path = get_songgen_repo_path()
-        ckpt_dir = songgen_path / "ckpt"
-        third_party_dir = songgen_path / "third_party"
-
-        if not ckpt_dir.exists() or not third_party_dir.exists():
-            print("[FL SongGen] Runtime files missing, downloading...")
-            if not _download_runtime_files():
-                return False
-    except FileNotFoundError:
-        print("[FL SongGen] ERROR: SongGeneration repository not found!")
-        print("[FL SongGen] Please clone it first:")
-        print("  cd /path/to/ComfyUI/..")
-        print("  git clone https://github.com/AslpLab/SongGeneration.git")
+    # First verify bundled code exists
+    bundled_check = check_bundled_files()
+    if not bundled_check['exists']:
+        print(f"[FL SongGen] ERROR: Bundled code files missing: {bundled_check['missing']}")
+        print("[FL SongGen] The node pack installation may be corrupted. Please reinstall.")
         return False
 
-    # Check model files
+    # Check if checkpoint files exist, download if needed
+    ckpt_check = check_checkpoint_files()
+    if not ckpt_check['exists']:
+        print(f"[FL SongGen] Checkpoint files missing: {ckpt_check['missing']}")
+        print("[FL SongGen] Downloading checkpoint files...")
+        if not _download_checkpoint_files():
+            return False
+
+    # Check model variant files
     file_check = check_model_files(variant)
     if file_check['exists']:
         return True
 
-    # Download model files
+    # Download model variant files
     print(f"[FL SongGen] Model files missing: {file_check['missing']}")
     return _download_model_files(variant)
 
@@ -408,7 +330,7 @@ def load_model(
     print(f"[FL SongGen] Low memory mode: {low_mem}")
     print(f"[FL SongGen] Flash Attention: {use_flash_attn}")
 
-    # Setup imports
+    # Setup imports from bundled code
     _setup_songgen_imports()
     _register_omegaconf_resolvers()
 
@@ -430,7 +352,7 @@ def load_model(
     cfg.mode = 'inference'
     max_duration = cfg.max_dur
 
-    # Import SongGeneration modules
+    # Import from bundled code
     from codeclm.models import builders, CodecLM
 
     model_info = {
@@ -547,18 +469,21 @@ def load_separator(device: str = "cuda") -> Any:
     """
     _setup_songgen_imports()
 
-    songgen_path = get_songgen_repo_path()
-    dm_model_path = songgen_path / "third_party" / "demucs" / "ckpt" / "htdemucs.pth"
-    dm_config_path = songgen_path / "third_party" / "demucs" / "ckpt" / "htdemucs.yaml"
+    # Import from bundled third_party
+    from third_party.demucs.models.pretrained import get_model_from_yaml
+
+    demucs_dir = get_demucs_dir()
+    dm_model_path = demucs_dir / "htdemucs.pth"
+
+    # Config is bundled in third_party
+    bundled_demucs = get_bundled_third_party_path() / "demucs" / "ckpt"
+    dm_config_path = bundled_demucs / "htdemucs.yaml"
 
     if not dm_model_path.exists():
         raise FileNotFoundError(
             f"Demucs model not found at {dm_model_path}. "
-            "Please ensure the SongGeneration repo includes the Demucs checkpoint."
+            "Please ensure checkpoint files are downloaded."
         )
-
-    # Import and create separator
-    from third_party.demucs.models.pretrained import get_model_from_yaml
 
     demucs_model = get_model_from_yaml(str(dm_config_path), str(dm_model_path))
 
@@ -579,6 +504,8 @@ def get_model_status() -> dict:
         "cached_models": list(_MODEL_CACHE.keys()),
         "available_variants": list(MODEL_VARIANTS.keys()),
         "auto_style_presets": AUTO_STYLE_PRESETS,
+        "bundled_code_status": check_bundled_files(),
+        "checkpoint_status": check_checkpoint_files(),
     }
 
     # Check VRAM if CUDA available
