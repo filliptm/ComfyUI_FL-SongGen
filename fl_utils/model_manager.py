@@ -560,11 +560,13 @@ def _load_full_model(
     update_progress()
 
     # Create CodecLM wrapper
+    # Note: audiotokenizer is set to None to match original SongGeneration behavior
+    # The original code always passes None here - encoding is done separately
     print("[FL SongGen] Creating model wrapper...")
     model = CodecLM(
         name=model_info["variant"],
         lm=audiolm,
-        audiotokenizer=audio_tokenizer,
+        audiotokenizer=None,
         max_duration=model_info["max_duration"],
         seperate_tokenizer=separate_tokenizer,
     )

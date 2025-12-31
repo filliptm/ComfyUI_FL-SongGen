@@ -232,5 +232,5 @@ class FL_SongGen_LyricsFormatter:
         # Split by newlines, strip each line, filter empty
         lines = [line.strip() for line in text.strip().split("\n") if line.strip()]
 
-        # Join with periods
-        return ".".join(lines)
+        # Join with period-space (matches original SongGeneration training data format)
+        return ". ".join(lines)

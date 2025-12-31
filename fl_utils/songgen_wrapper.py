@@ -398,8 +398,14 @@ class SongGenWrapper:
                         tokens, raw_pmt_wav, raw_vocal_wav, raw_bgm_wav,
                         chunked=True, gen_type='mixed'
                     )
-                    wav_vocal = model.generate_audio(tokens, chunked=True, gen_type='vocal')
-                    wav_bgm = model.generate_audio(tokens, chunked=True, gen_type='bgm')
+                    wav_vocal = model.generate_audio(
+                        tokens, raw_pmt_wav, raw_vocal_wav, raw_bgm_wav,
+                        chunked=True, gen_type='vocal'
+                    )
+                    wav_bgm = model.generate_audio(
+                        tokens, raw_pmt_wav, raw_vocal_wav, raw_bgm_wav,
+                        chunked=True, gen_type='bgm'
+                    )
                 else:
                     wav_mixed = model.generate_audio(tokens, chunked=True, gen_type='mixed')
                     wav_vocal = model.generate_audio(tokens, chunked=True, gen_type='vocal')
