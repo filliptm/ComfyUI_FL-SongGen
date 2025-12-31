@@ -49,10 +49,9 @@ except ImportError:
             return False
 from .configuration_llama import LlamaConfig
 
-
-if is_flash_attn_available():
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
-    from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
+# PyTorch's scaled_dot_product_attention is always available in PyTorch 2.0+
+# It automatically uses Flash Attention, Memory Efficient Attention, or Math fallback
+# This is simpler and handles GQA (Grouped Query Attention) properly
 
 
 logger = logging.get_logger(__name__)
@@ -511,16 +510,15 @@ class LlamaFlashAttention2(LlamaAttention):
         self, query_states, key_states, value_states, padding_mask, query_length, dropout=0.0, softmax_scale=None
     ):
         """
-        Calls the forward method of Flash Attention - if the input hidden states contain at least one padding token
-        first unpad the input, then computes the attention scores and pad the final attention scores.
+        Calls the forward method of efficient attention (SageAttention preferred, Flash Attention as fallback).
 
         Args:
             query_states (`torch.Tensor`):
-                Input query states to be passed to Flash Attention API
+                Input query states to be passed to attention API
             key_states (`torch.Tensor`):
-                Input key states to be passed to Flash Attention API
+                Input key states to be passed to attention API
             value_states (`torch.Tensor`):
-                Input value states to be passed to Flash Attention API
+                Input value states to be passed to attention API
             padding_mask (`torch.Tensor`):
                 The padding mask - corresponds to a tensor of size `(batch_size, seq_len)` where 0 stands for the
                 position of padding tokens and 1 for the position of non-padding tokens.
@@ -529,34 +527,33 @@ class LlamaFlashAttention2(LlamaAttention):
             softmax_scale (`float`, *optional*):
                 The scaling of QK^T before applying softmax. Default to 1 / sqrt(head_dim)
         """
-        # Contains at least one padding token in the sequence
-        if padding_mask is not None:
-            batch_size = query_states.shape[0]
-            query_states, key_states, value_states, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(
-                query_states, key_states, value_states, padding_mask, query_length
-            )
+        # Get tensor dimensions
+        batch_size, seq_len, num_heads, head_dim = query_states.shape
+        _, _, num_kv_heads, _ = key_states.shape
 
-            cu_seqlens_q, cu_seqlens_k = cu_seq_lens
-            max_seqlen_in_batch_q, max_seqlen_in_batch_k = max_seq_lens
+        # Use PyTorch's native scaled_dot_product_attention (fast with CUDA, handles GQA)
+        # It requires shape: (batch, num_heads, seq_len, head_dim)
+        query_states = query_states.transpose(1, 2)  # (batch, num_heads, seq_len, head_dim)
+        key_states = key_states.transpose(1, 2)
+        value_states = value_states.transpose(1, 2)
 
-            attn_output_unpad = flash_attn_varlen_func(
-                query_states,
-                key_states,
-                value_states,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_k=cu_seqlens_k,
-                max_seqlen_q=max_seqlen_in_batch_q,
-                max_seqlen_k=max_seqlen_in_batch_k,
-                dropout_p=dropout,
-                softmax_scale=softmax_scale,
-                causal=True,
-            )
+        # Handle GQA by expanding key/value heads to match query heads
+        if num_kv_heads != num_heads:
+            num_groups = num_heads // num_kv_heads
+            key_states = key_states.repeat_interleave(num_groups, dim=1)
+            value_states = value_states.repeat_interleave(num_groups, dim=1)
 
-            attn_output = pad_input(attn_output_unpad, indices_q, batch_size, query_length)
-        else:
-            attn_output = flash_attn_func(
-                query_states, key_states, value_states, dropout, softmax_scale=softmax_scale, causal=True
-            )
+        # Use scaled_dot_product_attention - automatically uses Flash Attention or Memory Efficient Attention
+        attn_output = F.scaled_dot_product_attention(
+            query_states, key_states, value_states,
+            attn_mask=None,
+            dropout_p=dropout if self.training else 0.0,
+            is_causal=True,
+            scale=softmax_scale,
+        )
+
+        # Transpose back: (batch, num_heads, seq_len, head_dim) -> (batch, seq_len, num_heads, head_dim)
+        attn_output = attn_output.transpose(1, 2)
 
         return attn_output
 

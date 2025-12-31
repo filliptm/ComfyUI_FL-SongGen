@@ -64,13 +64,6 @@ class FL_SongGen_ModelLoader:
                         "tooltip": "Enable low memory mode. Uses less VRAM but slower generation."
                     }
                 ),
-                "use_flash_attn": (
-                    "BOOLEAN",
-                    {
-                        "default": False,
-                        "tooltip": "Use Flash Attention 2 for faster inference (requires compatible GPU)."
-                    }
-                ),
                 "force_reload": (
                     "BOOLEAN",
                     {
@@ -85,7 +78,6 @@ class FL_SongGen_ModelLoader:
         self,
         model_variant: str,
         low_mem: bool = False,
-        use_flash_attn: bool = False,
         force_reload: bool = False
     ) -> Tuple[dict]:
         """
@@ -94,7 +86,6 @@ class FL_SongGen_ModelLoader:
         Args:
             model_variant: Which model variant to load
             low_mem: Enable low memory mode
-            use_flash_attn: Use Flash Attention 2
             force_reload: Force reload even if cached
 
         Returns:
@@ -111,14 +102,13 @@ class FL_SongGen_ModelLoader:
         print(f"Languages: {', '.join(variant_info['languages'])}")
         print(f"VRAM Required: {variant_info['vram_low'] if low_mem else variant_info['vram_normal']}GB")
         print(f"Low Memory Mode: {low_mem}")
-        print(f"Flash Attention: {use_flash_attn}")
         print(f"{'='*60}\n")
 
         try:
             model_info = load_model(
                 variant=model_variant,
                 low_mem=low_mem,
-                use_flash_attn=use_flash_attn,
+                use_flash_attn=False,
                 force_reload=force_reload
             )
             print(f"[FL SongGen] Model loaded successfully!")
