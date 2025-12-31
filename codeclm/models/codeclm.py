@@ -261,10 +261,11 @@ class CodecLM:
         if self.duration <= self.max_duration:
             # generate by sampling from LM, simple case.
             with self.autocast:
-                gen_tokens = self.lm.generate(texts=texts, 
-                                              descriptions=descriptions, 
-                                              audio_qt_embs=audio_qt_embs, 
-                                              max_gen_len=total_gen_len, 
+                gen_tokens = self.lm.generate(texts=texts,
+                                              descriptions=descriptions,
+                                              audio_qt_embs=audio_qt_embs,
+                                              max_gen_len=total_gen_len,
+                                              callback=_progress_callback,
                                               **self.generation_params)
         else:
             raise NotImplementedError(f"duration {self.duration} < max duration {self.max_duration}")

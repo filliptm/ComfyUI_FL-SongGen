@@ -8,6 +8,8 @@ import os
 from typing import Tuple
 import importlib.util
 
+from comfy.utils import ProgressBar
+
 # Get the package root directory
 _PACKAGE_ROOT = os.path.dirname(os.path.dirname(__file__))
 
@@ -105,11 +107,18 @@ class FL_SongGen_ModelLoader:
         print(f"{'='*60}\n")
 
         try:
+            # 4 steps for full model loading
+            pbar = ProgressBar(4)
+
+            def progress_callback(current, total):
+                pbar.update_absolute(current)
+
             model_info = load_model(
                 variant=model_variant,
                 low_mem=low_mem,
                 use_flash_attn=False,
-                force_reload=force_reload
+                force_reload=force_reload,
+                progress_callback=progress_callback
             )
             print(f"[FL SongGen] Model loaded successfully!")
             return (model_info,)

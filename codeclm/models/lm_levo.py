@@ -348,9 +348,10 @@ class LmModel(StreamingModule):
                  top_k: int = 250,
                  top_p: float = 0.0,
                  cfg_coef: tp.Optional[float] = None,
-                 check: bool = False,        
+                 check: bool = False,
                  record_tokens: bool = True,
-                 record_window: int = 150
+                 record_window: int = 150,
+                 callback: tp.Optional[tp.Callable[[int, int], None]] = None
                  ) -> torch.Tensor:
         """Generate tokens sampling from the model given a prompt or unconditionally. Generation can
         be perform in a greedy fashion or using sampling with top K and top P strategies.
@@ -452,6 +453,12 @@ class LmModel(StreamingModule):
                     gen_sequence = gen_sequence[..., :offset+1]
                     break
                 prev_offset = offset
+
+                # Call progress callback if provided
+                if callback is not None:
+                    current_step = offset - start_offset_sequence + 1
+                    total_steps = gen_sequence_len - start_offset_sequence
+                    callback(current_step, total_steps)
                 
         # ensure sequence has been entirely filled
         assert not (gen_sequence == unknown_token).any()

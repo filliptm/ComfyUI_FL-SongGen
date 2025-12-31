@@ -307,7 +307,8 @@ def load_model(
     low_mem: bool = False,
     use_flash_attn: bool = False,
     force_reload: bool = False,
-    device: Optional[str] = None
+    device: Optional[str] = None,
+    progress_callback: Optional[callable] = None
 ) -> Dict[str, Any]:
     """
     Load SongGeneration model.
@@ -318,6 +319,7 @@ def load_model(
         use_flash_attn: Use Flash Attention 2
         force_reload: Force reload even if cached
         device: Device to load model on (default: auto-detect)
+        progress_callback: Optional callback(current, total) for progress updates
 
     Returns:
         Dict containing model components and configuration
@@ -431,9 +433,11 @@ def load_model(
         model_info["ckpt_path"] = str(ckpt_path)
         model_info["loaded"] = False
         print("[FL SongGen] Low memory mode: model will be loaded on-demand")
+        if progress_callback:
+            progress_callback(1, 1)  # Complete immediately for low_mem mode
     else:
         # Normal mode: load everything now
-        model_info = _load_full_model(model_info, cfg, ckpt_path, device)
+        model_info = _load_full_model(model_info, cfg, ckpt_path, device, progress_callback)
 
     # Load auto prompts if available
     auto_prompts_path = get_auto_prompts_path()
@@ -455,10 +459,21 @@ def _load_full_model(
     model_info: dict,
     cfg: OmegaConf,
     ckpt_path: Path,
-    device: str
+    device: str,
+    progress_callback: Optional[callable] = None
 ) -> dict:
     """Load full model (non-low-memory mode)."""
     from codeclm.models import builders, CodecLM
+
+    # Total steps: audio_tokenizer, separate_tokenizer, language_model, create_wrapper
+    total_steps = 4
+    current_step = 0
+
+    def update_progress():
+        nonlocal current_step
+        current_step += 1
+        if progress_callback:
+            progress_callback(current_step, total_steps)
 
     # Load audio tokenizer for prompt encoding
     print("[FL SongGen] Loading audio tokenizer...")
@@ -468,6 +483,7 @@ def _load_full_model(
         if device == "cuda":
             audio_tokenizer = audio_tokenizer.cuda()
     model_info["audio_tokenizer"] = audio_tokenizer
+    update_progress()
 
     # Load separate tokenizer for vocal/bgm encoding
     print("[FL SongGen] Loading separate tokenizer...")
@@ -480,6 +496,7 @@ def _load_full_model(
     else:
         separate_tokenizer = None
     model_info["separate_tokenizer"] = separate_tokenizer
+    update_progress()
 
     # Load LM
     print("[FL SongGen] Loading language model...")
@@ -540,8 +557,10 @@ def _load_full_model(
 
     if device == "cuda":
         audiolm = audiolm.cuda().to(torch.float16)
+    update_progress()
 
     # Create CodecLM wrapper
+    print("[FL SongGen] Creating model wrapper...")
     model = CodecLM(
         name=model_info["variant"],
         lm=audiolm,
@@ -553,6 +572,7 @@ def _load_full_model(
     model_info["model"] = model
     model_info["audiolm"] = audiolm
     model_info["loaded"] = True
+    update_progress()
 
     # Cleanup checkpoint to save memory
     del checkpoint
