@@ -18,3 +18,5 @@ julius>=0.2.7
 lameenc>=1.8.1
 k-diffusion>=0.1.1
 vector-quantize-pytorch>=1.14.0
+x-transformers>=2.0.0
+packaging>=21.0
