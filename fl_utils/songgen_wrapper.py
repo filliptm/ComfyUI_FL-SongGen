@@ -337,6 +337,10 @@ class SongGenWrapper:
             for k, v in checkpoint.items()
             if k.startswith('audiolm')
         }
+
+        # Resize embedding layers to match checkpoint (fixes tokenizer version mismatch)
+        audiolm = self._resize_embeddings_for_checkpoint(audiolm, audiolm_state_dict)
+
         audiolm.load_state_dict(audiolm_state_dict, strict=False)
         audiolm = audiolm.eval().cuda().to(torch.float16)
 
@@ -509,6 +513,65 @@ class SongGenWrapper:
         else:
             # No prompt
             return None, None, None, True
+
+    def _resize_embeddings_for_checkpoint(self, model: torch.nn.Module, state_dict: dict) -> torch.nn.Module:
+        """
+        Resize embedding layers in the model to match checkpoint dimensions.
+        This fixes tokenizer version mismatches where vocab sizes differ.
+
+        Args:
+            model: The model to resize embeddings in
+            state_dict: The checkpoint state dict to match
+
+        Returns:
+            The model with resized embeddings
+        """
+        import torch.nn as nn
+
+        def get_nested_attr(obj, attr_path):
+            """Get nested attribute from object using dot-separated path."""
+            parts = attr_path.split('.')
+            for part in parts:
+                if hasattr(obj, part):
+                    obj = getattr(obj, part)
+                elif hasattr(obj, '_modules') and part in obj._modules:
+                    obj = obj._modules[part]
+                else:
+                    return None
+            return obj
+
+        def set_nested_attr(obj, attr_path, value):
+            """Set nested attribute on object using dot-separated path."""
+            parts = attr_path.split('.')
+            for part in parts[:-1]:
+                if hasattr(obj, part):
+                    obj = getattr(obj, part)
+                elif hasattr(obj, '_modules') and part in obj._modules:
+                    obj = obj._modules[part]
+                else:
+                    return False
+            setattr(obj, parts[-1], value)
+            return True
+
+        for key, ckpt_tensor in state_dict.items():
+            if 'output_proj.weight' in key:
+                # Get the path to the parent module (remove .weight)
+                module_path = key.rsplit('.', 1)[0]
+                current_module = get_nested_attr(model, module_path)
+
+                if current_module is not None and hasattr(current_module, 'weight'):
+                    current_size = current_module.weight.shape[0]
+                    checkpoint_size = ckpt_tensor.shape[0]
+
+                    if current_size != checkpoint_size:
+                        print(f"[FL SongGen LowMem] Resizing embedding {module_path}: {current_size} -> {checkpoint_size}")
+                        # Create new embedding with checkpoint size
+                        embed_dim = ckpt_tensor.shape[1]
+                        padding_idx = getattr(current_module, 'padding_idx', None)
+                        new_embedding = nn.Embedding(checkpoint_size, embed_dim, padding_idx=padding_idx)
+                        set_nested_attr(model, module_path, new_embedding)
+
+        return model
 
     def _separate_audio(self, audio: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """

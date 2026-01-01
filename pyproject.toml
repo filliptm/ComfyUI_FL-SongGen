@@ -1,7 +1,7 @@
 [project]
 name = "comfyui_fl-songgen"
 description = "FL Song Gen - AI-powered song generation nodes for ComfyUI. Generate complete songs with vocals and instrumentals from lyrics using Tencent's SongGeneration (LeVo) model. Features style transfer, auto style presets, dual-track output, and up to 4m30s song generation."
-version = "1.1.1"
+version = "1.1.2"
 license = "Apache-2.0"
 dependencies = [
     "torch>=2.0.0",
