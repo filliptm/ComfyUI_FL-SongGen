@@ -30,6 +30,11 @@ get_variant_list = _model_manager.get_variant_list
 get_variant_info = _model_manager.get_variant_info
 MODEL_VARIANTS = _model_manager.MODEL_VARIANTS
 clear_model_cache = _model_manager.clear_model_cache
+get_recommended_memory_mode = _model_manager.get_recommended_memory_mode
+get_available_vram_gb = _model_manager.get_available_vram_gb
+
+# Memory mode options
+MEMORY_MODES = ["auto", "normal", "low", "ultra"]
 
 
 class FL_SongGen_ModelLoader:
@@ -59,11 +64,11 @@ class FL_SongGen_ModelLoader:
                 ),
             },
             "optional": {
-                "low_mem": (
-                    "BOOLEAN",
+                "memory_mode": (
+                    MEMORY_MODES,
                     {
-                        "default": False,
-                        "tooltip": "Enable low memory mode. Uses less VRAM but slower generation."
+                        "default": "auto",
+                        "tooltip": "Memory mode: auto (recommended), normal (fast, high VRAM), low (slower, less VRAM), ultra (slowest, minimum VRAM ~6GB)"
                     }
                 ),
                 "force_reload": (
@@ -79,7 +84,7 @@ class FL_SongGen_ModelLoader:
     def load_model(
         self,
         model_variant: str,
-        low_mem: bool = False,
+        memory_mode: str = "auto",
         force_reload: bool = False
     ) -> Tuple[dict]:
         """
@@ -87,12 +92,24 @@ class FL_SongGen_ModelLoader:
 
         Args:
             model_variant: Which model variant to load
-            low_mem: Enable low memory mode
+            memory_mode: Memory mode - "auto", "normal", "low", or "ultra"
             force_reload: Force reload even if cached
 
         Returns:
             Tuple containing the model info dict
         """
+        # Resolve memory mode
+        if memory_mode == "auto":
+            resolved_mode = get_recommended_memory_mode(model_variant)
+            available_vram = get_available_vram_gb()
+            print(f"[FL SongGen] Auto-detected memory mode: {resolved_mode} (available VRAM: {available_vram:.1f}GB)")
+        else:
+            resolved_mode = memory_mode
+
+        # Map mode to flags
+        low_mem = resolved_mode in ("low", "ultra_low_mem", "low_mem")
+        ultra_low_mem = resolved_mode in ("ultra", "ultra_low_mem")
+
         # Get variant info for logging
         variant_info = get_variant_info(model_variant)
         print(f"\n{'='*60}")
@@ -102,8 +119,13 @@ class FL_SongGen_ModelLoader:
         print(f"Description: {variant_info['description']}")
         print(f"Max Duration: {variant_info['max_duration']}s ({variant_info['max_duration']//60}m {variant_info['max_duration']%60}s)")
         print(f"Languages: {', '.join(variant_info['languages'])}")
-        print(f"VRAM Required: {variant_info['vram_low'] if low_mem else variant_info['vram_normal']}GB")
-        print(f"Low Memory Mode: {low_mem}")
+        print(f"Memory Mode: {resolved_mode}")
+        if ultra_low_mem:
+            print(f"VRAM Required: ~6GB (ultra low memory mode)")
+        elif low_mem:
+            print(f"VRAM Required: {variant_info['vram_low']}GB")
+        else:
+            print(f"VRAM Required: {variant_info['vram_normal']}GB")
         print(f"{'='*60}\n")
 
         try:
@@ -115,11 +137,15 @@ class FL_SongGen_ModelLoader:
 
             model_info = load_model(
                 variant=model_variant,
-                low_mem=low_mem,
+                low_mem=low_mem or ultra_low_mem,
                 use_flash_attn=False,
                 force_reload=force_reload,
                 progress_callback=progress_callback
             )
+
+            # Add ultra_low_mem flag to model_info for generation phase
+            model_info["ultra_low_mem"] = ultra_low_mem
+
             print(f"[FL SongGen] Model loaded successfully!")
             return (model_info,)
 

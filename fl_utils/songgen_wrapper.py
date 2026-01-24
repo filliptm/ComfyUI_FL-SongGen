@@ -62,6 +62,7 @@ class SongGenWrapper:
         self.sample_rate = model_info.get("sample_rate", 24000)
         self.device = model_info.get("device", "cuda")
         self.low_mem = model_info.get("low_mem", False)
+        self.ultra_low_mem = model_info.get("ultra_low_mem", False)
         self.auto_prompts = model_info.get("auto_prompts")
 
         # Frame rate for progress calculation
@@ -123,7 +124,12 @@ class SongGenWrapper:
         lyrics = LYRICS_FILTER_REGEX.sub("", lyrics)
         lyrics = re.sub(r"\s+", " ", lyrics)  # Normalize multiple spaces to single space
 
-        if self.low_mem:
+        if self.ultra_low_mem:
+            return self._generate_ultra_lowmem(
+                lyrics, description, prompt_audio, auto_style,
+                duration, temperature, cfg_coef, top_k, gen_type
+            )
+        elif self.low_mem:
             return self._generate_lowmem(
                 lyrics, description, prompt_audio, auto_style,
                 duration, temperature, cfg_coef, top_k, gen_type
@@ -466,6 +472,275 @@ class SongGenWrapper:
             bgm_audio = empty_audio(self.sample_rate)
 
         print(f"[FL SongGen LowMem] Generation complete!")
+        return mixed_audio, vocal_audio, bgm_audio
+
+    def _generate_ultra_lowmem(
+        self,
+        lyrics: str,
+        description: Optional[str],
+        prompt_audio: Optional[torch.Tensor],
+        auto_style: Optional[str],
+        duration: float,
+        temperature: float,
+        cfg_coef: float,
+        top_k: int,
+        gen_type: str,
+    ) -> Tuple[dict, Optional[dict], Optional[dict]]:
+        """
+        Ultra low memory generation mode for systems with limited VRAM (~6-8GB).
+
+        Key differences from low_mem mode:
+        - Aggressive VRAM cleanup before each phase
+        - Loads model weights incrementally
+        - Uses CPU for more operations
+        - More aggressive garbage collection
+        """
+        # Import builders for on-demand loading
+        from codeclm.models import builders, CodecLM
+
+        cfg = self.config
+        ckpt_path = self.model_info["ckpt_path"]
+
+        print(f"[FL SongGen UltraLowMem] Starting generation with aggressive memory management...")
+
+        # Phase 0: Aggressive initial cleanup
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            # Log initial VRAM state
+            allocated = torch.cuda.memory_allocated() / (1024**3)
+            reserved = torch.cuda.memory_reserved() / (1024**3)
+            print(f"[FL SongGen UltraLowMem] Initial VRAM: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
+
+        # Determine if we need audio tokenizer
+        use_audio_tokenizer = prompt_audio is not None
+
+        # Store raw wavs for later
+        raw_pmt_wav = None
+        raw_vocal_wav = None
+        raw_bgm_wav = None
+
+        # Phase 1: Process prompts with audio tokenizer (if needed)
+        if use_audio_tokenizer:
+            print("[FL SongGen UltraLowMem] Phase 1: Processing audio prompts...")
+
+            # Load and process audio tokenizer
+            audio_tokenizer = builders.get_audio_tokenizer_model(cfg.audio_tokenizer_checkpoint, cfg)
+            audio_tokenizer = audio_tokenizer.eval().cuda()
+
+            # Separate and encode prompt audio
+            raw_pmt_wav, raw_vocal_wav, raw_bgm_wav = self._separate_audio(prompt_audio)
+
+            with torch.no_grad():
+                pmt_wav, _ = audio_tokenizer.encode(raw_pmt_wav.cuda())
+
+            # Aggressive cleanup
+            del audio_tokenizer
+            gc.collect()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+            # Load separate tokenizer for vocal/bgm
+            print("[FL SongGen UltraLowMem] Loading separate tokenizer...")
+            separate_tokenizer = builders.get_audio_tokenizer_model(cfg.audio_tokenizer_checkpoint_sep, cfg)
+            separate_tokenizer = separate_tokenizer.eval().cuda()
+
+            with torch.no_grad():
+                vocal_wav, bgm_wav = separate_tokenizer.encode(
+                    raw_vocal_wav.cuda(),
+                    raw_bgm_wav.cuda()
+                )
+
+            # Aggressive cleanup
+            del separate_tokenizer
+            gc.collect()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+            melody_is_wav = False
+        else:
+            # Use auto prompts or no prompt
+            pmt_wav, vocal_wav, bgm_wav, melody_is_wav = self._prepare_prompts(
+                None, auto_style, None
+            )
+
+        # Phase 2: Generate tokens with LM - ultra careful memory management
+        print("[FL SongGen UltraLowMem] Phase 2: Loading language model with memory optimization...")
+
+        # Pre-cleanup before loading large model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            allocated = torch.cuda.memory_allocated() / (1024**3)
+            print(f"[FL SongGen UltraLowMem] Pre-LM VRAM: {allocated:.2f}GB")
+
+        # Build LM on CPU first
+        audiolm = builders.get_lm_model(cfg)
+
+        # Load checkpoint - keep on CPU
+        print("[FL SongGen UltraLowMem] Loading checkpoint...")
+        checkpoint = torch.load(ckpt_path, map_location='cpu')
+        audiolm_state_dict = {
+            k.replace('audiolm.', ''): v
+            for k, v in checkpoint.items()
+            if k.startswith('audiolm')
+        }
+
+        # Free checkpoint memory immediately
+        del checkpoint
+        gc.collect()
+
+        # Resize embeddings to match checkpoint
+        audiolm = self._resize_embeddings_for_checkpoint(audiolm, audiolm_state_dict)
+
+        # Load state dict on CPU
+        audiolm.load_state_dict(audiolm_state_dict, strict=False)
+
+        # Free state dict memory
+        del audiolm_state_dict
+        gc.collect()
+
+        # Now move to GPU in float16
+        print("[FL SongGen UltraLowMem] Moving model to GPU...")
+        audiolm = audiolm.eval().to(torch.float16).cuda()
+
+        # Aggressive cleanup after GPU transfer
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / (1024**3)
+            print(f"[FL SongGen UltraLowMem] Post-LM load VRAM: {allocated:.2f}GB")
+
+        model = CodecLM(
+            name="tmp",
+            lm=audiolm,
+            audiotokenizer=None,
+            max_duration=self.max_duration,
+            seperate_tokenizer=None,
+        )
+
+        model.set_generation_params(
+            duration=duration,
+            extend_stride=5,
+            temperature=temperature,
+            cfg_coef=cfg_coef,
+            top_k=top_k,
+            top_p=0.0,
+            record_tokens=True,
+            record_window=50
+        )
+
+        # Set progress callback
+        def progress_wrapper(current, total):
+            if self._progress_callback:
+                self._progress_callback(current, total)
+
+        model.set_custom_progress_callback(progress_wrapper)
+
+        generate_inp = {
+            'lyrics': [lyrics],
+            'descriptions': [description],
+            'melody_wavs': pmt_wav,
+            'vocal_wavs': vocal_wav,
+            'bgm_wavs': bgm_wav,
+            'melody_is_wav': melody_is_wav,
+        }
+
+        print(f"[FL SongGen UltraLowMem] Generating tokens...")
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            with torch.no_grad():
+                tokens = model.generate(**generate_inp, return_tokens=True)
+
+        # Phase 2 cleanup - very aggressive
+        print("[FL SongGen UltraLowMem] Cleaning up LM...")
+        del model
+
+        # Move audiolm to CPU before deletion to free GPU memory faster
+        audiolm = audiolm.cpu()
+        del audiolm
+
+        # Multiple cleanup rounds
+        gc.collect()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            allocated = torch.cuda.memory_allocated() / (1024**3)
+            print(f"[FL SongGen UltraLowMem] Post-LM cleanup VRAM: {allocated:.2f}GB")
+
+        # Phase 3: Decode audio with separate tokenizer
+        print("[FL SongGen UltraLowMem] Phase 3: Loading audio decoder...")
+
+        separate_tokenizer = builders.get_audio_tokenizer_model_cpu(cfg.audio_tokenizer_checkpoint_sep, cfg)
+        device = "cuda:0"
+        separate_tokenizer.model.device = device
+        separate_tokenizer.model.vae = separate_tokenizer.model.vae.to(device)
+        separate_tokenizer.model.model.device = torch.device(device)
+        separate_tokenizer.model.model = separate_tokenizer.model.model.to(device)
+        separate_tokenizer = separate_tokenizer.eval()
+
+        model = CodecLM(
+            name="tmp",
+            lm=None,
+            audiotokenizer=None,
+            max_duration=self.max_duration,
+            seperate_tokenizer=separate_tokenizer,
+        )
+
+        print(f"[FL SongGen UltraLowMem] Decoding audio...")
+        with torch.no_grad():
+            if gen_type == 'separate':
+                if raw_pmt_wav is not None:
+                    wav_mixed = model.generate_audio(
+                        tokens, raw_pmt_wav, raw_vocal_wav, raw_bgm_wav,
+                        chunked=True, gen_type='mixed'
+                    )
+                    wav_vocal = model.generate_audio(
+                        tokens, raw_pmt_wav, raw_vocal_wav, raw_bgm_wav,
+                        chunked=True, gen_type='vocal'
+                    )
+                    wav_bgm = model.generate_audio(
+                        tokens, raw_pmt_wav, raw_vocal_wav, raw_bgm_wav,
+                        chunked=True, gen_type='bgm'
+                    )
+                else:
+                    wav_mixed = model.generate_audio(tokens, chunked=True, gen_type='mixed')
+                    wav_vocal = model.generate_audio(tokens, chunked=True, gen_type='vocal')
+                    wav_bgm = model.generate_audio(tokens, chunked=True, gen_type='bgm')
+            else:
+                if raw_pmt_wav is not None:
+                    wav_mixed = model.generate_audio(
+                        tokens, raw_pmt_wav, raw_vocal_wav, raw_bgm_wav,
+                        chunked=True, gen_type=gen_type
+                    )
+                else:
+                    wav_mixed = model.generate_audio(tokens, chunked=True, gen_type=gen_type)
+                wav_vocal = None
+                wav_bgm = None
+
+        # Final cleanup
+        del model
+        del separate_tokenizer
+        gc.collect()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # Convert to ComfyUI format
+        mixed_audio = tensor_to_comfyui_audio(wav_mixed[0].cpu().float(), self.sample_rate)
+
+        if gen_type == 'separate':
+            vocal_audio = tensor_to_comfyui_audio(wav_vocal[0].cpu().float(), self.sample_rate)
+            bgm_audio = tensor_to_comfyui_audio(wav_bgm[0].cpu().float(), self.sample_rate)
+        else:
+            vocal_audio = empty_audio(self.sample_rate)
+            bgm_audio = empty_audio(self.sample_rate)
+
+        print(f"[FL SongGen UltraLowMem] Generation complete!")
         return mixed_audio, vocal_audio, bgm_audio
 
     def _prepare_prompts(

@@ -685,6 +685,63 @@ def load_separator(device: str = "cuda") -> Any:
     return demucs_model
 
 
+def get_available_vram_gb() -> float:
+    """
+    Get available VRAM in GB.
+
+    Returns:
+        Available VRAM in GB, or 0 if CUDA not available.
+    """
+    if not torch.cuda.is_available():
+        return 0.0
+
+    # Get total and allocated memory
+    total = torch.cuda.get_device_properties(0).total_memory
+    allocated = torch.cuda.memory_allocated(0)
+    reserved = torch.cuda.memory_reserved(0)
+
+    # Available = total - max(allocated, reserved) - some overhead
+    used = max(allocated, reserved)
+    available = (total - used) / (1024**3)
+
+    # Account for ~1.5GB system/driver overhead
+    available = max(0, available - 1.5)
+
+    return available
+
+
+def get_recommended_memory_mode(variant: str) -> str:
+    """
+    Auto-detect best memory mode based on available VRAM.
+
+    Args:
+        variant: Model variant name
+
+    Returns:
+        Recommended mode: "normal", "low_mem", or "ultra_low_mem"
+    """
+    if not torch.cuda.is_available():
+        return "ultra_low_mem"
+
+    available_vram = get_available_vram_gb()
+    variant_info = MODEL_VARIANTS.get(variant, {})
+
+    vram_normal = variant_info.get("vram_normal", 16)
+    vram_low = variant_info.get("vram_low", 10)
+    # Ultra low mem can work with ~6GB for base models
+    vram_ultra = max(6, vram_low - 4)
+
+    if available_vram >= vram_normal:
+        return "normal"
+    elif available_vram >= vram_low:
+        return "low_mem"
+    elif available_vram >= vram_ultra:
+        return "ultra_low_mem"
+    else:
+        print(f"[FL SongGen] WARNING: Very low VRAM ({available_vram:.1f}GB). Generation may fail.")
+        return "ultra_low_mem"
+
+
 def get_model_status() -> dict:
     """Get status of loaded models."""
     status = {
@@ -701,6 +758,7 @@ def get_model_status() -> dict:
         status["vram_total_gb"] = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         status["vram_allocated_gb"] = torch.cuda.memory_allocated(0) / (1024**3)
         status["vram_reserved_gb"] = torch.cuda.memory_reserved(0) / (1024**3)
+        status["vram_available_gb"] = get_available_vram_gb()
     else:
         status["cuda_available"] = False
 
