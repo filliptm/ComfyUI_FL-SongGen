@@ -127,26 +127,10 @@ __version__ = "1.0.0"
 
 # ASCII banner
 ascii_art = """
- ███████╗██╗         ███████╗ ██████╗ ███╗   ██╗ ██████╗      ██████╗ ███████╗███╗   ██╗
- ██╔════╝██║         ██╔════╝██╔═══██╗████╗  ██║██╔════╝     ██╔════╝ ██╔════╝████╗  ██║
- █████╗  ██║         ███████╗██║   ██║██╔██╗ ██║██║  ███╗    ██║  ███╗█████╗  ██╔██╗ ██║
- ██╔══╝  ██║         ╚════██║██║   ██║██║╚██╗██║██║   ██║    ██║   ██║██╔══╝  ██║╚██╗██║
- ██║     ███████╗    ███████║╚██████╔╝██║ ╚████║╚██████╔╝    ╚██████╔╝███████╗██║ ╚████║
- ╚═╝     ╚══════╝    ╚══════╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝      ╚═════╝ ╚══════╝╚═╝  ╚═══╝
+⣏⡉ ⡇    ⢎⡑ ⢀⡀ ⣀⡀ ⢀⡀ ⡎⠑ ⢀⡀ ⣀⡀
+⠇  ⠧⠤   ⠢⠜ ⠣⠜ ⠇⠸ ⣑⡺ ⠣⠝ ⠣⠭ ⠇⠸
 """
-
-print(ascii_art)
-print("=" * 85)
+print(f"\033[35m{ascii_art}\033[0m")
 print(f"FL Song Gen v{__version__} - AI Song Generation for ComfyUI")
-print("Based on Tencent's SongGeneration (LeVo) model")
-print("-" * 85)
-print("Nodes loaded:")
-print("  - FL Song Gen Model Loader      : Load the song generation model")
-print("  - FL Song Gen Lyrics Formatter  : Format lyrics with section tags")
-print("  - FL Song Gen Description Builder: Build style descriptions")
-print("  - FL Song Gen Generate          : Generate songs with text conditioning")
-print("  - FL Song Gen Style Transfer    : Generate songs with audio style reference")
-print("  - FL Song Gen Auto Style        : Generate songs with preset styles")
-print("=" * 85)
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
