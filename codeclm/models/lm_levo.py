@@ -105,7 +105,7 @@ class LmModel(StreamingModule):
             max_position_embeddings=max_position_embeddings,
             rms_norm_eps= 1e-5,
             rope_theta= rope_theta,
-            _flash_attn_2_enabled=use_flash_attn_2,
+            _attn_backend="sdpa" if use_flash_attn_2 else "manual",
         )
 
         self.transformer = CausalLM(model_cfg)
@@ -127,7 +127,7 @@ class LmModel(StreamingModule):
             max_position_embeddings=max_position_embeddings_sub,
             rms_norm_eps= 1e-5,
             rope_theta= rope_theta_sub,
-            _flash_attn_2_enabled=use_flash_attn_2,
+            _attn_backend="sdpa" if use_flash_attn_2 else "manual",
         )
 
         self.transformer2 = CausalLM(sub_model_cfg)

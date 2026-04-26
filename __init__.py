@@ -93,6 +93,10 @@ sg_auto_style = import_module_from_path(
     "sg_auto_style",
     os.path.join(current_dir, "fl_nodes", "auto_style.py")
 )
+sg_parameter_guide = import_module_from_path(
+    "sg_parameter_guide",
+    os.path.join(current_dir, "fl_nodes", "parameter_guide.py")
+)
 
 # Get node classes
 FL_SongGen_ModelLoader = sg_model_loader.FL_SongGen_ModelLoader
@@ -101,6 +105,7 @@ FL_SongGen_DescriptionBuilder = sg_description_builder.FL_SongGen_DescriptionBui
 FL_SongGen_Generate = sg_generate.FL_SongGen_Generate
 FL_SongGen_StyleTransfer = sg_style_transfer.FL_SongGen_StyleTransfer
 FL_SongGen_AutoStyle = sg_auto_style.FL_SongGen_AutoStyle
+FL_SongGen_ParameterGuide = sg_parameter_guide.FL_SongGen_ParameterGuide
 
 # Node registration for ComfyUI
 NODE_CLASS_MAPPINGS = {
@@ -110,6 +115,7 @@ NODE_CLASS_MAPPINGS = {
     "FL_SongGen_Generate": FL_SongGen_Generate,
     "FL_SongGen_StyleTransfer": FL_SongGen_StyleTransfer,
     "FL_SongGen_AutoStyle": FL_SongGen_AutoStyle,
+    "FL_SongGen_ParameterGuide": FL_SongGen_ParameterGuide,
 }
 
 # Display names for the UI
@@ -120,6 +126,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FL_SongGen_Generate": "FL Song Gen Generate",
     "FL_SongGen_StyleTransfer": "FL Song Gen Style Transfer",
     "FL_SongGen_AutoStyle": "FL Song Gen Auto Style",
+    "FL_SongGen_ParameterGuide": "FL Song Gen Parameter Guide",
 }
 
 # Version info

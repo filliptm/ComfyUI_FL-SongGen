@@ -22,6 +22,136 @@ LYRICS_FILTER_REGEX = re.compile(
     r"[^\w\s\[\]\-;\.\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af\u00c0-\u017f]"
 )
 
+# Valid structure tags recognized by the model
+_STRUCT_TAGS = {
+    "intro-short", "intro-medium", "intro-long",
+    "outro-short", "outro-medium", "outro-long",
+    "inst-short", "inst-medium", "inst-long",
+    "verse", "chorus", "bridge",
+}
+# Shorthand expansions (matches official Gradio app)
+_TAG_SHORTCUTS = {"intro": "intro-short", "inst": "inst-short", "outro": "outro-short"}
+
+
+def normalize_lyrics(text: str) -> str:
+    """Normalize pretty-formatted lyrics to the official single-line format.
+
+    Accepts multiple input styles:
+    - Already-formatted single-line: ``[intro-short] ; [verse] line1.line2 ; ...``
+    - Paragraph style (double newline between sections)::
+
+        [intro-short]
+
+        [verse]
+        Line one
+        Line two
+
+        [chorus]
+        Chorus line
+
+    - Mixed style with explicit ``;`` separators and newlines
+
+    Returns a single-line string matching the official format.
+    """
+    if not text or not text.strip():
+        return text
+
+    # Expand shorthand tags
+    for short, full in _TAG_SHORTCUTS.items():
+        text = re.sub(rf"\[{short}\]", f"[{full}]", text, flags=re.IGNORECASE)
+
+    # If the input already looks like single-line format (has ; separators,
+    # no double newlines), just clean it up
+    has_double_newline = "\n\n" in text
+    has_single_newlines_with_tags = bool(re.search(r"\n\s*\[", text))
+
+    if has_double_newline or has_single_newlines_with_tags:
+        # Parse paragraph/multiline format
+        # Split on double newlines, or on lines that start with a tag
+        # First, normalize: split on double newlines OR on newline-before-tag
+        text = re.sub(r"\n\s*\n", "\n\n", text)  # normalize multiple blank lines
+        # Also split when a new [tag] appears on its own line
+        text = re.sub(r"\n(\s*\[)", r"\n\n\1", text)
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+
+        sections = []
+        for para in paragraphs:
+            lines = [l.strip() for l in para.split("\n") if l.strip()]
+            if not lines:
+                continue
+
+            # Check if first line is a structure tag
+            tag_match = re.match(r"^\[([a-zA-Z\-]+)\]\s*;?\s*$", lines[0])
+            if tag_match:
+                tag_name = tag_match.group(1).lower()
+                if tag_name in _STRUCT_TAGS:
+                    # Tag-only line (intro/outro/inst) or tag with lyrics following
+                    if len(lines) == 1:
+                        sections.append(f"[{tag_name}]")
+                    else:
+                        # Lyrics follow on subsequent lines
+                        cleaned = []
+                        for line in lines[1:]:
+                            line = line.rstrip(";").strip()
+                            line = LYRICS_FILTER_REGEX.sub("", line)
+                            line = re.sub(r"\s+", " ", line).strip()
+                            if line:
+                                cleaned.append(line)
+                        if cleaned:
+                            sections.append(f"[{tag_name}] " + ".".join(cleaned))
+                        else:
+                            sections.append(f"[{tag_name}]")
+                    continue
+
+            # Check if first line contains tag + lyrics inline: [verse] Some lyrics here
+            inline_match = re.match(r"^\[([a-zA-Z\-]+)\]\s*(.*)", lines[0])
+            if inline_match:
+                tag_name = inline_match.group(1).lower()
+                first_lyrics = inline_match.group(2).strip().rstrip(";").strip()
+                if tag_name in _STRUCT_TAGS:
+                    cleaned = []
+                    if first_lyrics:
+                        first_lyrics = LYRICS_FILTER_REGEX.sub("", first_lyrics)
+                        first_lyrics = re.sub(r"\s+", " ", first_lyrics).strip()
+                        # Split on existing periods
+                        for phrase in first_lyrics.split("."):
+                            phrase = phrase.strip()
+                            if phrase:
+                                cleaned.append(phrase)
+                    for line in lines[1:]:
+                        line = line.rstrip(";").strip()
+                        line = LYRICS_FILTER_REGEX.sub("", line)
+                        line = re.sub(r"\s+", " ", line).strip()
+                        if line:
+                            cleaned.append(line)
+                    if cleaned:
+                        sections.append(f"[{tag_name}] " + ".".join(cleaned))
+                    else:
+                        sections.append(f"[{tag_name}]")
+                    continue
+
+            # No tag found — treat as continuation lyrics (shouldn't happen normally)
+            cleaned = []
+            for line in lines:
+                line = line.rstrip(";").strip()
+                line = LYRICS_FILTER_REGEX.sub("", line)
+                line = re.sub(r"\s+", " ", line).strip()
+                if line:
+                    cleaned.append(line)
+            if cleaned:
+                sections.append(".".join(cleaned))
+
+        result = " ; ".join(sections)
+    else:
+        # Already single-line format — just normalize spacing around semicolons
+        result = text.strip()
+        # Normalize semicolons: ensure " ; " with spaces
+        result = re.sub(r"\s*;\s*", " ; ", result)
+
+    # Final cleanup
+    result = re.sub(r"\s+", " ", result).strip()
+    return result
+
 # Get the fl_utils directory (same directory as this file)
 _FL_UTILS_DIR = os.path.dirname(__file__)
 
@@ -75,6 +205,15 @@ class SongGenWrapper:
         """Set callback for progress updates."""
         self._progress_callback = callback
 
+    @staticmethod
+    def _check_interrupt():
+        """Check if ComfyUI user requested cancellation and raise if so."""
+        try:
+            import comfy.model_management
+            comfy.model_management.throw_exception_if_processing_interrupted()
+        except ImportError:
+            pass
+
     def generate(
         self,
         lyrics: str,
@@ -120,9 +259,26 @@ class SongGenWrapper:
             print(f"[FL SongGen] Duration {duration}s exceeds max {self.max_duration}s, clamping.")
             duration = self.max_duration
 
-        # Clean lyrics - remove unsupported punctuation and normalize spaces
+        # Normalize lyrics format (multiline → single-line, fix semicolons, etc.)
+        lyrics = normalize_lyrics(lyrics)
+        # Final filter pass — remove any remaining unsupported characters
         lyrics = LYRICS_FILTER_REGEX.sub("", lyrics)
-        lyrics = re.sub(r"\s+", " ", lyrics)  # Normalize multiple spaces to single space
+        lyrics = re.sub(r"\s+", " ", lyrics).strip()
+        print(f"[FL SongGen] Normalized lyrics: {lyrics[:200]}")
+
+        # v2 description preprocessing - matches official SongGeneration v2 exactly
+        variant = self.model_info.get("variant", "")
+        is_v2 = "v2" in variant
+        if is_v2:
+            if gen_type == "bgm":
+                if description:
+                    description = "[Musicality-very-high], [Pure-Music], " + description.lower()
+                else:
+                    description = "."
+            else:
+                description = description.lower() if description else "."
+                description = "[Musicality-very-high], " + description
+            print(f"[FL SongGen] v2 description: {description[:100]}")
 
         if self.ultra_low_mem:
             return self._generate_ultra_lowmem(
@@ -154,6 +310,11 @@ class SongGenWrapper:
     ) -> Tuple[dict, Optional[dict], Optional[dict]]:
         """Normal generation mode (sufficient VRAM)."""
         model = self.model_info["model"]
+
+        # Ensure LM is on GPU (may have been offloaded to CPU after previous decode)
+        if self.device == "cuda" and not next(model.lm.parameters()).is_cuda:
+            print(f"[FL SongGen] Moving LM back to GPU...")
+            model.lm.to(torch.float16).cuda()
         audio_tokenizer = self.model_info.get("audio_tokenizer")
         separate_tokenizer = self.model_info.get("separate_tokenizer")
 
@@ -190,6 +351,7 @@ class SongGenWrapper:
 
         # Set progress callback - pass through actual total from model
         def progress_wrapper(current, total):
+            self._check_interrupt()
             if self._progress_callback:
                 self._progress_callback(current, total)
 
@@ -220,6 +382,25 @@ class SongGenWrapper:
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.device == "cuda"):
             with torch.no_grad():
                 tokens = model.generate(**generate_inp, return_tokens=True)
+
+        # Offload LM to CPU before audio decoding if VRAM is tight.
+        # The LM (~13GB) is no longer needed — only the separate_tokenizer (VAE) decodes tokens.
+        # On high-VRAM cards (32GB+), skip offload to avoid ~7s transfer overhead.
+        # Also check system RAM can hold the model before offloading.
+        import gc
+        import psutil
+        vram_free = 0
+        if torch.cuda.is_available():
+            vram_free = (torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_reserved(0)) / 1024**3
+        if vram_free < 8:
+            ram_free_gb = psutil.virtual_memory().available / 1024**3
+            if ram_free_gb > 16:
+                model.lm.cpu()
+                gc.collect()
+                torch.cuda.empty_cache()
+                print(f"[FL SongGen] LM offloaded to CPU (VRAM free: {vram_free:.1f}GB, RAM free: {ram_free_gb:.0f}GB)")
+            else:
+                print(f"[FL SongGen] Skipping LM offload (not enough RAM: {ram_free_gb:.0f}GB free, need 16GB+)")
 
         # Generate audio from tokens
         print(f"[FL SongGen] Decoding audio...")
@@ -334,8 +515,9 @@ class SongGenWrapper:
 
         # Phase 2: Generate tokens with LM
         print("[FL SongGen LowMem] Loading language model...")
-        audiolm = builders.get_lm_model(cfg)
-        checkpoint = torch.load(ckpt_path, map_location='cpu')
+        version = 'v2' if 'v2' in self.model_info.get('variant', '') else 'v1'
+        audiolm = builders.get_lm_model(cfg, version=version)
+        checkpoint = torch.load(ckpt_path, map_location='cpu', mmap=True)
         audiolm_state_dict = {
             k.replace('audiolm.', ''): v
             for k, v in checkpoint.items()
@@ -346,7 +528,10 @@ class SongGenWrapper:
         audiolm = self._resize_embeddings_for_checkpoint(audiolm, audiolm_state_dict)
 
         audiolm.load_state_dict(audiolm_state_dict, strict=False)
-        audiolm = audiolm.eval().cuda().to(torch.float16)
+        del audiolm_state_dict
+        del checkpoint
+        gc.collect()
+        audiolm = audiolm.eval().to(torch.float16).cuda()
 
         model = CodecLM(
             name="tmp",
@@ -369,6 +554,7 @@ class SongGenWrapper:
 
         # Set progress callback - pass through actual total from model
         def progress_wrapper(current, total):
+            self._check_interrupt()
             if self._progress_callback:
                 self._progress_callback(current, total)
 
@@ -402,7 +588,6 @@ class SongGenWrapper:
         del model
         audiolm = audiolm.cpu()
         del audiolm
-        del checkpoint
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -577,11 +762,12 @@ class SongGenWrapper:
             print(f"[FL SongGen UltraLowMem] Pre-LM VRAM: {allocated:.2f}GB")
 
         # Build LM on CPU first
-        audiolm = builders.get_lm_model(cfg)
+        version = 'v2' if 'v2' in self.model_info.get('variant', '') else 'v1'
+        audiolm = builders.get_lm_model(cfg, version=version)
 
         # Load checkpoint - keep on CPU
         print("[FL SongGen UltraLowMem] Loading checkpoint...")
-        checkpoint = torch.load(ckpt_path, map_location='cpu')
+        checkpoint = torch.load(ckpt_path, map_location='cpu', mmap=True)
         audiolm_state_dict = {
             k.replace('audiolm.', ''): v
             for k, v in checkpoint.items()
@@ -636,6 +822,7 @@ class SongGenWrapper:
 
         # Set progress callback
         def progress_wrapper(current, total):
+            self._check_interrupt()
             if self._progress_callback:
                 self._progress_callback(current, total)
 

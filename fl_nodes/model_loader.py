@@ -32,9 +32,10 @@ MODEL_VARIANTS = _model_manager.MODEL_VARIANTS
 clear_model_cache = _model_manager.clear_model_cache
 get_recommended_memory_mode = _model_manager.get_recommended_memory_mode
 get_available_vram_gb = _model_manager.get_available_vram_gb
+set_keep_loaded = _model_manager.set_keep_loaded
 
-# Memory mode options
-MEMORY_MODES = ["auto", "normal", "low", "ultra"]
+# Memory modes
+MEMORY_MODES = ["auto", "normal", "low", "ultra_low_mem"]
 
 
 class FL_SongGen_ModelLoader:
@@ -51,6 +52,18 @@ class FL_SongGen_ModelLoader:
     CATEGORY = "FL Song Gen"
 
     @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # Force re-execution when model cache was cleared (e.g. after Unload Models)
+        try:
+            import comfy.model_management as cmm
+            cache = getattr(cmm, '_songgen_cache', {})
+            if not cache:
+                return float("nan")  # Always re-run when cache is empty
+        except ImportError:
+            pass
+        return ""
+
+    @classmethod
     def INPUT_TYPES(cls):
         variants = get_variant_list()
         return {
@@ -58,8 +71,8 @@ class FL_SongGen_ModelLoader:
                 "model_variant": (
                     variants,
                     {
-                        "default": "songgeneration_base_new",
-                        "tooltip": "Model variant to load. 'base_new' supports English+Chinese."
+                        "default": "songgeneration_v2_large",
+                        "tooltip": "Model variant. v2-large = best quality, multilingual. base_new = lighter, English+Chinese."
                     }
                 ),
             },
@@ -68,7 +81,7 @@ class FL_SongGen_ModelLoader:
                     MEMORY_MODES,
                     {
                         "default": "auto",
-                        "tooltip": "Memory mode: auto (recommended), normal (fast, high VRAM), low (slower, less VRAM), ultra (slowest, minimum VRAM ~6GB)"
+                        "tooltip": "auto picks the best mode for your GPU. normal = fastest. low = offloads between phases. ultra_low_mem = minimum ~6GB VRAM."
                     }
                 ),
                 "force_reload": (
@@ -78,6 +91,13 @@ class FL_SongGen_ModelLoader:
                         "tooltip": "Force reload model even if already cached."
                     }
                 ),
+                "keep_model_loaded": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "Keep model in VRAM between runs. Disable to free VRAM for other models between generations."
+                    }
+                ),
             }
         }
 
@@ -85,19 +105,9 @@ class FL_SongGen_ModelLoader:
         self,
         model_variant: str,
         memory_mode: str = "auto",
-        force_reload: bool = False
+        force_reload: bool = False,
+        keep_model_loaded: bool = True,
     ) -> Tuple[dict]:
-        """
-        Load the SongGeneration model.
-
-        Args:
-            model_variant: Which model variant to load
-            memory_mode: Memory mode - "auto", "normal", "low", or "ultra"
-            force_reload: Force reload even if cached
-
-        Returns:
-            Tuple containing the model info dict
-        """
         # Resolve memory mode
         if memory_mode == "auto":
             resolved_mode = get_recommended_memory_mode(model_variant)
@@ -138,15 +148,19 @@ class FL_SongGen_ModelLoader:
             model_info = load_model(
                 variant=model_variant,
                 low_mem=low_mem or ultra_low_mem,
-                use_flash_attn=False,
+                use_flash_attn=True,
                 force_reload=force_reload,
-                progress_callback=progress_callback
+                progress_callback=progress_callback,
+                attention_backend="sdpa",
             )
 
             # Add ultra_low_mem flag to model_info for generation phase
             model_info["ultra_low_mem"] = ultra_low_mem
 
-            print(f"[FL SongGen] Model loaded successfully!")
+            # Configure ComfyUI VRAM integration
+            set_keep_loaded(keep_model_loaded)
+
+            print(f"[FL SongGen] Model loaded successfully! (keep_model_loaded={keep_model_loaded})")
             return (model_info,)
 
         except FileNotFoundError as e:

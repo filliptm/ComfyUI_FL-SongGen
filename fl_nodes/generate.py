@@ -29,6 +29,9 @@ _audio_utils = _import_from_package("audio_utils", "audio_utils")
 SongGenWrapper = _songgen_wrapper.SongGenWrapper
 empty_audio = _audio_utils.empty_audio
 
+# Gen types
+GEN_TYPES = ["mixed", "separate", "vocal", "bgm"]
+
 
 class FL_SongGen_Generate:
     """
@@ -50,7 +53,7 @@ class FL_SongGen_Generate:
                 "model": (
                     "SONGGEN_MODEL",
                     {
-                        "tooltip": "Loaded SongGeneration model"
+                        "tooltip": "Loaded SongGeneration model from the Model Loader node"
                     }
                 ),
                 "lyrics": (
@@ -58,7 +61,7 @@ class FL_SongGen_Generate:
                     {
                         "multiline": True,
                         "default": "[intro-short] ; [verse] Hello world.This is a test ; [chorus] Singing along.Making music ; [outro-short]",
-                        "tooltip": "Formatted lyrics with section tags"
+                        "tooltip": "Lyrics with section tags: [intro], [verse], [chorus], [bridge], [outro], [intro-short], [outro-short]"
                     }
                 ),
             },
@@ -67,7 +70,7 @@ class FL_SongGen_Generate:
                     "STRING",
                     {
                         "default": "",
-                        "tooltip": "Style description (e.g., 'female, pop, emotional, piano and drums')"
+                        "tooltip": "Style description: gender, genre, emotion, instruments (e.g. 'female, pop, emotional, piano and drums')"
                     }
                 ),
                 "duration": (
@@ -77,17 +80,17 @@ class FL_SongGen_Generate:
                         "min": 30.0,
                         "max": 270.0,
                         "step": 5.0,
-                        "tooltip": "Target duration in seconds (max depends on model variant)"
+                        "tooltip": "Target duration in seconds. Max 150s for base models, 270s (4m30s) for large/v2."
                     }
                 ),
                 "temperature": (
                     "FLOAT",
                     {
-                        "default": 0.9,
+                        "default": 1.0,
                         "min": 0.1,
                         "max": 2.0,
                         "step": 0.05,
-                        "tooltip": "Sampling temperature (higher = more random)"
+                        "tooltip": "Sampling temperature. 1.0 = balanced (official default). Lower = more consistent, higher = more creative/diverse."
                     }
                 ),
                 "cfg_coef": (
@@ -97,7 +100,7 @@ class FL_SongGen_Generate:
                         "min": 0.5,
                         "max": 5.0,
                         "step": 0.1,
-                        "tooltip": "Classifier-free guidance strength"
+                        "tooltip": "Classifier-free guidance. 1.5 = official default. Higher = stronger adherence to lyrics/description."
                     }
                 ),
                 "top_k": (
@@ -105,16 +108,16 @@ class FL_SongGen_Generate:
                     {
                         "default": 50,
                         "min": 1,
-                        "max": 500,
-                        "step": 10,
-                        "tooltip": "Top-k sampling (lower = more focused)"
+                        "max": 5000,
+                        "step": 1,
+                        "tooltip": "Top-k sampling. 50 = focused (official default). Higher values (500-5000) = more diverse/experimental."
                     }
                 ),
                 "gen_type": (
-                    ["mixed", "separate", "vocal", "bgm"],
+                    GEN_TYPES,
                     {
                         "default": "mixed",
-                        "tooltip": "Output type: mixed (combined), separate (all tracks), vocal only, or bgm only"
+                        "tooltip": "mixed = combined song. separate = vocal + BGM + mixed tracks. vocal/bgm = single track."
                     }
                 ),
                 "seed": (
@@ -123,7 +126,7 @@ class FL_SongGen_Generate:
                         "default": -1,
                         "min": -1,
                         "max": 2147483647,
-                        "tooltip": "Random seed (-1 for random)"
+                        "tooltip": "Random seed for reproducible results. -1 = random."
                     }
                 ),
             }
@@ -135,29 +138,12 @@ class FL_SongGen_Generate:
         lyrics: str,
         description: str = "",
         duration: float = 60.0,
-        temperature: float = 0.9,
+        temperature: float = 1.0,
         cfg_coef: float = 1.5,
         top_k: int = 50,
         gen_type: str = "mixed",
         seed: int = -1
     ) -> Tuple[dict, dict, dict]:
-        """
-        Generate song from lyrics and optional description.
-
-        Args:
-            model: Loaded model info dict
-            lyrics: Formatted lyrics with section tags
-            description: Style description
-            duration: Target duration in seconds
-            temperature: Sampling temperature
-            cfg_coef: Classifier-free guidance strength
-            top_k: Top-k sampling parameter
-            gen_type: Output type (mixed, separate, vocal, bgm)
-            seed: Random seed
-
-        Returns:
-            (mixed_audio, vocal_audio, bgm_audio) as ComfyUI AUDIO dicts
-        """
         print(f"\n{'='*60}")
         print(f"[FL SongGen] Starting Generation")
         print(f"{'='*60}")

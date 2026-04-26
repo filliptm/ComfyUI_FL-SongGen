@@ -24,6 +24,13 @@ warnings.filterwarnings("ignore", message=".*will NOT inherit from.*")
 warnings.filterwarnings("ignore", message=".*_set_gradient_checkpointing.*")
 warnings.filterwarnings("ignore", category=FutureWarning, module="transformers.*")
 
+# Also suppress via transformers' own logging system
+try:
+    import transformers.utils.logging as _tf_logging
+    _tf_logging.set_verbosity_error()
+except Exception:
+    pass
+
 # Get the fl_utils directory (same directory as this file)
 _FL_UTILS_DIR = os.path.dirname(__file__)
 
@@ -96,6 +103,15 @@ MODEL_VARIANTS = {
         "hf_repo": "waytan22/SongGeneration-v1.5-beta",
         "hf_subfolder": None,
     },
+    "songgeneration_v2_large": {
+        "max_duration": 270,
+        "vram_normal": 28,
+        "vram_low": 22,
+        "languages": ["zh", "en", "es", "ja", "ko", "fr", "de", "pt", "it", "ru"],
+        "description": "v2-large - Best quality, multilingual, 4m30s max",
+        "hf_repo": "lglg666/SongGeneration-v2-large",
+        "hf_subfolder": None,
+    },
 }
 
 # Checkpoints HuggingFace repo - contains only model weights (no code)
@@ -107,8 +123,30 @@ AUTO_STYLE_PRESETS = [
     "Metal", "Reggae", "Chinese Opera", "Auto"
 ]
 
-# Global model cache
-_MODEL_CACHE: Dict[str, Any] = {}
+# Global model cache — stored on comfy.model_management so all importlib instances
+# of this module share the same dict (importlib re-imports create separate module globals).
+def _get_shared_cache() -> Dict[str, Any]:
+    """Get the shared model cache dict (stored on comfy.model_management to survive importlib re-imports)."""
+    try:
+        import comfy.model_management as cmm
+        if not hasattr(cmm, '_songgen_cache'):
+            cmm._songgen_cache = {}
+        return cmm._songgen_cache
+    except ImportError:
+        # Fallback for non-ComfyUI environments
+        global _MODEL_CACHE_FALLBACK
+        return _MODEL_CACHE_FALLBACK
+
+_MODEL_CACHE_FALLBACK: Dict[str, Any] = {}
+
+
+def _get_keep_loaded() -> bool:
+    """Get the shared keep_loaded flag."""
+    try:
+        import comfy.model_management as cmm
+        return getattr(cmm, '_songgen_keep_loaded', True)
+    except ImportError:
+        return True
 
 
 def get_variant_list() -> list:
@@ -124,12 +162,87 @@ def get_variant_info(variant: str) -> dict:
 
 
 def clear_model_cache():
-    """Clear all cached models and free memory."""
-    global _MODEL_CACHE
-    _MODEL_CACHE.clear()
+    """Clear all cached models and free GPU memory.
+
+    Explicitly moves model components off GPU before clearing the cache dict,
+    so GPU memory is freed even if ComfyUI's execution cache still holds
+    a stale reference to the model_info dict.
+    """
+    cache = _get_shared_cache()
+    if not cache:
+        return
+    print("[FL SongGen] Clearing model cache...")
+    for key, model_info in cache.items():
+        # Move all model components to CPU to free VRAM
+        # Do NOT set attrs to None — ComfyUI's execution cache may still hold
+        # this dict, and the wrapper can restore models to GPU on next run.
+        for attr in ("audiolm", "audio_tokenizer", "separate_tokenizer", "model"):
+            obj = model_info.get(attr)
+            if obj is not None and hasattr(obj, "cpu"):
+                try:
+                    obj.cpu()
+                except Exception:
+                    pass
+        model_info["loaded"] = False
+    cache.clear()
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+def set_keep_loaded(keep: bool):
+    """Set whether SongGen model should stay loaded when ComfyUI needs VRAM."""
+    try:
+        import comfy.model_management as cmm
+        cmm._songgen_keep_loaded = keep
+    except ImportError:
+        pass
+
+
+def _hook_comfy_model_management():
+    """
+    Patch ComfyUI's memory management so SongGen's cache is freed appropriately.
+
+    - soft_empty_cache: Called on VRAM pressure. Respects keep_loaded flag.
+    - unload_all_models: Called by ComfyUI Manager "Unload Models" button (/free endpoint).
+      Always clears SongGen cache since it's an explicit user action.
+
+    Idempotent — checks for sentinel attributes to avoid re-patching on importlib re-imports.
+    """
+    try:
+        import comfy.model_management as cmm
+
+        # Hook soft_empty_cache (VRAM pressure — respects keep_loaded)
+        if not getattr(cmm.soft_empty_cache, '_songgen_patched', False):
+            _original_soft_empty_cache = cmm.soft_empty_cache
+
+            def _patched_soft_empty_cache(*args, **kwargs):
+                if not _get_keep_loaded() and _get_shared_cache():
+                    clear_model_cache()
+                return _original_soft_empty_cache(*args, **kwargs)
+
+            _patched_soft_empty_cache._songgen_patched = True
+            cmm.soft_empty_cache = _patched_soft_empty_cache
+
+        # Hook unload_all_models (explicit user action — always clear)
+        if not getattr(cmm.unload_all_models, '_songgen_patched', False):
+            _original_unload_all_models = cmm.unload_all_models
+
+            def _patched_unload_all_models(*args, **kwargs):
+                if _get_shared_cache():
+                    print("[FL SongGen] Unloading models (explicit unload request)")
+                    clear_model_cache()
+                return _original_unload_all_models(*args, **kwargs)
+
+            _patched_unload_all_models._songgen_patched = True
+            cmm.unload_all_models = _patched_unload_all_models
+
+        print("[FL SongGen] Hooked into ComfyUI model management")
+    except Exception as e:
+        print(f"[FL SongGen] Could not hook ComfyUI model management: {e}")
+
+
+_hook_comfy_model_management()
 
 
 def _setup_songgen_imports():
@@ -321,7 +434,8 @@ def load_model(
     use_flash_attn: bool = False,
     force_reload: bool = False,
     device: Optional[str] = None,
-    progress_callback: Optional[callable] = None
+    progress_callback: Optional[callable] = None,
+    attention_backend: str = "sdpa",
 ) -> Dict[str, Any]:
     """
     Load SongGeneration model.
@@ -329,22 +443,23 @@ def load_model(
     Args:
         variant: Model variant name
         low_mem: Enable low memory mode
-        use_flash_attn: Use Flash Attention 2
+        use_flash_attn: Use optimized attention (sageattn or sdpa)
         force_reload: Force reload even if cached
         device: Device to load model on (default: auto-detect)
         progress_callback: Optional callback(current, total) for progress updates
+        attention_backend: Attention backend ("sageattn", "sdpa", or "manual")
 
     Returns:
         Dict containing model components and configuration
     """
-    global _MODEL_CACHE
+    cache = _get_shared_cache()
 
-    cache_key = f"{variant}_{low_mem}_{use_flash_attn}"
+    cache_key = f"{variant}_{low_mem}_{attention_backend}"
 
     # Return cached model if available
-    if not force_reload and cache_key in _MODEL_CACHE:
+    if not force_reload and cache_key in cache:
         print(f"[FL SongGen] Using cached model: {variant}")
-        return _MODEL_CACHE[cache_key]
+        return cache[cache_key]
 
     # Clear cache if force reload
     if force_reload:
@@ -361,7 +476,7 @@ def load_model(
 
     print(f"[FL SongGen] Loading model: {variant}")
     print(f"[FL SongGen] Low memory mode: {low_mem}")
-    print(f"[FL SongGen] Flash Attention: {use_flash_attn}")
+    print(f"[FL SongGen] Attention backend: {attention_backend}")
 
     # Setup imports from bundled code
     _setup_songgen_imports()
@@ -462,7 +577,7 @@ def load_model(
         print(f"[FL SongGen] Auto prompts not found at {auto_prompts_path}")
 
     # Cache the model
-    _MODEL_CACHE[cache_key] = model_info
+    cache[cache_key] = model_info
 
     print(f"[FL SongGen] Model loaded successfully")
     return model_info
@@ -513,13 +628,16 @@ def _load_full_model(
 
     # Load LM
     print("[FL SongGen] Loading language model...")
-    audiolm = builders.get_lm_model(cfg)
-    checkpoint = torch.load(str(ckpt_path), map_location='cpu')
+    version = 'v2' if 'v2' in model_info.get('variant', '') else 'v1'
+    audiolm = builders.get_lm_model(cfg, version=version)
+    checkpoint = torch.load(str(ckpt_path), map_location='cpu', mmap=True)
     audiolm_state_dict = {
         k.replace('audiolm.', ''): v
         for k, v in checkpoint.items()
         if k.startswith('audiolm')
     }
+    del checkpoint
+    gc.collect()
 
     # Resize embedding layers that have size mismatches (due to tokenizer version differences)
     def get_nested_attr(obj, attr_path):
@@ -569,7 +687,7 @@ def _load_full_model(
     audiolm = audiolm.eval()
 
     if device == "cuda":
-        audiolm = audiolm.cuda().to(torch.float16)
+        audiolm = audiolm.to(torch.float16).cuda()
     update_progress()
 
     # Create CodecLM wrapper
@@ -588,12 +706,6 @@ def _load_full_model(
     model_info["audiolm"] = audiolm
     model_info["loaded"] = True
     update_progress()
-
-    # Cleanup checkpoint to save memory
-    del checkpoint
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
 
     return model_info
 
@@ -745,7 +857,7 @@ def get_recommended_memory_mode(variant: str) -> str:
 def get_model_status() -> dict:
     """Get status of loaded models."""
     status = {
-        "cached_models": list(_MODEL_CACHE.keys()),
+        "cached_models": list(_get_shared_cache().keys()),
         "available_variants": list(MODEL_VARIANTS.keys()),
         "auto_style_presets": AUTO_STYLE_PRESETS,
         "bundled_code_status": check_bundled_files(),

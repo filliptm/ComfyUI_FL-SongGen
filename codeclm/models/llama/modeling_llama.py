@@ -378,24 +378,44 @@ class LlamaAttention(nn.Module):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-        if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
-            raise ValueError(
-                f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
-                f" {attn_weights.size()}"
-            )
-
-        if attention_mask is not None:
-            if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+        # Use optimized attention when enabled via config
+        _attn_backend = getattr(self.config, "_attn_backend", "manual")  # "sdpa" or "manual"
+        if _attn_backend == "sdpa" and not output_attentions:
+            # The attention mask from this model is always purely causal (no padding, no
+            # special patterns). We can bypass the additive mask and use SDPA's native
+            # causal mode, which enables fused Flash Attention / Memory Efficient kernels.
+            # - q_len == 1 (streaming/generation): single query attends to full KV cache,
+            #   no mask needed at all
+            # - q_len > 1 (prefill): is_causal=True applies causal pattern in fused kernel
+            if q_len == 1:
+                attn_output = F.scaled_dot_product_attention(
+                    query_states, key_states, value_states,
+                    dropout_p=0.0, is_causal=False,
                 )
-            attn_weights = attn_weights + attention_mask
+            else:
+                attn_output = F.scaled_dot_product_attention(
+                    query_states, key_states, value_states,
+                    dropout_p=0.0, is_causal=True,
+                )
+        else:
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_output = torch.matmul(attn_weights, value_states)
+            if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
+                raise ValueError(
+                    f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
+                    f" {attn_weights.size()}"
+                )
+
+            if attention_mask is not None:
+                if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+                    raise ValueError(
+                        f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                    )
+                attn_weights = attn_weights + attention_mask
+
+            # upcast attention to fp32
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
@@ -495,7 +515,7 @@ class LlamaFlashAttention2(LlamaAttention):
             value_states = value_states.to(torch.float16)
 
         attn_output = self._flash_attention_forward(
-            query_states, key_states, value_states, padding_mask, q_len, dropout=dropout_rate
+            query_states, key_states, value_states, attention_mask, q_len, dropout=dropout_rate
         )
 
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
@@ -507,33 +527,25 @@ class LlamaFlashAttention2(LlamaAttention):
         return attn_output, attn_weights, past_key_value
 
     def _flash_attention_forward(
-        self, query_states, key_states, value_states, padding_mask, query_length, dropout=0.0, softmax_scale=None
+        self, query_states, key_states, value_states, attention_mask, query_length, dropout=0.0, softmax_scale=None
     ):
         """
-        Calls the forward method of efficient attention (SageAttention preferred, Flash Attention as fallback).
+        Efficient attention using PyTorch's scaled_dot_product_attention.
 
         Args:
-            query_states (`torch.Tensor`):
-                Input query states to be passed to attention API
-            key_states (`torch.Tensor`):
-                Input key states to be passed to attention API
-            value_states (`torch.Tensor`):
-                Input value states to be passed to attention API
-            padding_mask (`torch.Tensor`):
-                The padding mask - corresponds to a tensor of size `(batch_size, seq_len)` where 0 stands for the
-                position of padding tokens and 1 for the position of non-padding tokens.
-            dropout (`int`, *optional*):
-                Attention dropout
-            softmax_scale (`float`, *optional*):
-                The scaling of QK^T before applying softmax. Default to 1 / sqrt(head_dim)
+            query_states: (batch, seq_len, num_heads, head_dim)
+            key_states: (batch, kv_len, num_kv_heads, head_dim)
+            value_states: (batch, kv_len, num_kv_heads, head_dim)
+            attention_mask: Additive attention mask (batch, 1, q_len, kv_len) or None
+            query_length: Length of query sequence
+            dropout: Attention dropout rate
+            softmax_scale: Optional scaling factor
         """
-        # Get tensor dimensions
         batch_size, seq_len, num_heads, head_dim = query_states.shape
-        _, _, num_kv_heads, _ = key_states.shape
+        _, kv_len, num_kv_heads, _ = key_states.shape
 
-        # Use PyTorch's native scaled_dot_product_attention (fast with CUDA, handles GQA)
-        # It requires shape: (batch, num_heads, seq_len, head_dim)
-        query_states = query_states.transpose(1, 2)  # (batch, num_heads, seq_len, head_dim)
+        # SDPA requires shape: (batch, num_heads, seq_len, head_dim)
+        query_states = query_states.transpose(1, 2)
         key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
 
@@ -543,12 +555,16 @@ class LlamaFlashAttention2(LlamaAttention):
             key_states = key_states.repeat_interleave(num_groups, dim=1)
             value_states = value_states.repeat_interleave(num_groups, dim=1)
 
-        # Use scaled_dot_product_attention - automatically uses Flash Attention or Memory Efficient Attention
+        # Determine masking strategy:
+        # - If attention_mask is provided, use it (additive mask, compatible with SDPA)
+        # - Otherwise fall back to is_causal=True
+        use_causal = attention_mask is None
+
         attn_output = F.scaled_dot_product_attention(
             query_states, key_states, value_states,
-            attn_mask=None,
+            attn_mask=attention_mask if not use_causal else None,
             dropout_p=dropout if self.training else 0.0,
-            is_causal=True,
+            is_causal=use_causal,
             scale=softmax_scale,
         )
 
@@ -963,7 +979,13 @@ class LlamaModel(LlamaPreTrainedModel):
         )
 
 
-class LlamaForCausalLM(LlamaPreTrainedModel):
+try:
+    from transformers import GenerationMixin as _GenerationMixin
+    _LlamaForCausalLM_bases = (LlamaPreTrainedModel, _GenerationMixin)
+except ImportError:
+    _LlamaForCausalLM_bases = (LlamaPreTrainedModel,)
+
+class LlamaForCausalLM(*_LlamaForCausalLM_bases):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
